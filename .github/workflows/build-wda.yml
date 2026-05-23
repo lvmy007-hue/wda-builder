@@ -16,7 +16,10 @@ jobs:
           ref: master
 
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode.app
+        run: |
+          ls /Applications/ | grep Xcode
+          sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
 
       - name: Build WebDriverAgentRunner (unsigned)
         run: |
@@ -29,23 +32,94 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            | tail -20
+            2>&1 | tail -30
+
+      - name: Debug - Show build output
+        if: always()
+        run: |
+          echo "=== All .app directories ==="
+          find ./build -name "*.app" -type d 2>/dev/null || echo "No .app found"
+          echo ""
+          echo "=== All Info.plist files ==="
+          find ./build -name "Info.plist" -path "*.app/*" 2>/dev/null | head -20
+          echo ""
+          echo "=== Build Products directory ==="
+          ls -la ./build/Build/Products/ 2>/dev/null || echo "No Products dir"
+          ls -laR ./build/Build/Products/Debug-iphoneos/ 2>/dev/null | head -30 || echo "No Debug-iphoneos dir"
+          ls -laR ./build/Build/Products/Release-iphoneos/ 2>/dev/null | head -30 || echo "No Release-iphoneos dir"
 
       - name: Package IPA
         run: |
-          APP_PATH=$(find ./build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
-          echo "Found app at: $APP_PATH"
-          
+          echo "=== Searching for Runner app ==="
+          APP_PATH=$(find ./build -name "*Runner*.app" -type d | head -1)
+
           if [ -z "$APP_PATH" ]; then
-            echo "WebDriverAgentRunner-Runner.app not found, searching for alternatives..."
-            find ./build -name "*.app" -type d
+            echo "Runner app not found, trying any .app..."
             APP_PATH=$(find ./build -name "*.app" -type d | head -1)
           fi
 
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app found in build output!"
+            find ./build -type f -name "*.app" -o -type d -name "*.app" 2>/dev/null
+            exit 1
+          fi
+
+          echo "Using app: $APP_PATH"
+          APP_NAME=$(basename "$APP_PATH")
+          echo "App name: $APP_NAME"
+
+          # Verify Info.plist exists
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "WARNING: Info.plist not found at $APP_PATH/Info.plist"
+            echo "Contents of app directory:"
+            ls -la "$APP_PATH/"
+            # Try to find Info.plist inside
+            find "$APP_PATH" -name "Info.plist" -maxdepth 2
+          fi
+
+          # Create proper IPA structure: Payload/XXX.app/
+          rm -rf Payload
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
+          cp -r "$APP_PATH" "Payload/$APP_NAME"
+
+          echo "=== Payload structure ==="
+          ls -la Payload/
+          ls -la "Payload/$APP_NAME/" | head -10
+
+          # Verify the structure before zipping
+          if [ -f "Payload/$APP_NAME/Info.plist" ]; then
+            echo "Info.plist verified OK"
+          else
+            echo "WARNING: Info.plist still missing, creating minimal one"
+            cat > "Payload/$APP_NAME/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.facebook.WebDriverAgentRunner.xctrunner</string>
+            <key>CFBundleName</key>
+            <string>WebDriverAgentRunner-Runner</string>
+            <key>CFBundleExecutable</key>
+            <string>WebDriverAgentRunner-Runner</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>MinimumOSVersion</key>
+            <string>16.0</string>
+          </dict>
+          </plist>
+          PLIST
+          fi
+
           zip -r WebDriverAgent.ipa Payload/
+          echo "=== IPA created ==="
           ls -la WebDriverAgent.ipa
+          # Verify IPA contents
+          unzip -l WebDriverAgent.ipa | head -20
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
