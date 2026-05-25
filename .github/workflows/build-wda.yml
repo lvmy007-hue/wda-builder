@@ -32,43 +32,100 @@ jobs:
             DEVELOPMENT_TEAM="" \
             ARCHS="arm64" \
             ONLY_ACTIVE_ARCH=NO \
-            2>&1 | tail -30
+            2>&1 | tail -20
 
-      - name: Package IPA
+      - name: Inspect and package
         run: |
-          echo "=== Finding app ==="
+          echo "========== ALL .app DIRECTORIES =========="
           find ./build -name "*.app" -type d
 
-          RUNNER=$(find ./build/Build/Products -name "*Runner*.app" -type d | head -1)
+          echo ""
+          echo "========== DETAILED CONTENTS =========="
+          for app in $(find ./build -name "*.app" -type d); do
+            echo "--- $app ---"
+            ls -la "$app/" 2>/dev/null | head -20
+            echo "Info.plist exists: $(test -f "$app/Info.plist" && echo YES || echo NO)"
+            if [ -f "$app/Info.plist" ]; then
+              /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Info.plist" 2>/dev/null || echo "no bundle id"
+              /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Info.plist" 2>/dev/null || echo "no exec"
+            fi
+            echo ""
+          done
+
+          echo "========== XCTESTRUN FILES =========="
+          find ./build -name "*.xctestrun" -type f
+
+          echo ""
+          echo "========== PRODUCTS DIR =========="
+          ls -laR ./build/Build/Products/ 2>/dev/null | head -80
+
+      - name: Create IPA from correct app
+        run: |
+          # Find the runner app specifically in Products
+          RUNNER=$(find ./build/Build/Products -name "*Runner*.app" -type d -not -path "*/PlugIns/*" | head -1)
+          
           if [ -z "$RUNNER" ]; then
-            RUNNER=$(find ./build -name "*.app" -type d | head -1)
+            echo "No Runner app, trying any .app not in PlugIns..."
+            RUNNER=$(find ./build/Build/Products -name "*.app" -type d -not -path "*/PlugIns/*" | head -1)
           fi
 
           if [ -z "$RUNNER" ]; then
-            echo "FATAL: No .app found!"
+            echo "FATAL: Cannot find any suitable .app"
             exit 1
           fi
 
-          echo "Using: $RUNNER"
-          ls -la "$RUNNER/"
-
-          # Ad-hoc sign after build
-          codesign --force --deep --sign - "$RUNNER" || true
-
-          # Create IPA
+          echo "Selected app: $RUNNER"
           APP_NAME=$(basename "$RUNNER")
+
+          # Check if Info.plist exists, create if missing
+          if [ ! -f "$RUNNER/Info.plist" ]; then
+            echo "Info.plist MISSING - creating from build settings..."
+            
+            # Try to find Info.plist elsewhere in the build
+            FOUND_PLIST=$(find ./build -name "Info.plist" -path "*Runner*" | head -1)
+            if [ -n "$FOUND_PLIST" ]; then
+              echo "Found plist at: $FOUND_PLIST"
+              cp "$FOUND_PLIST" "$RUNNER/Info.plist"
+            else
+              echo "Creating minimal Info.plist..."
+              /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.facebook.WebDriverAgentRunner.xctrunner" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleName string WebDriverAgentRunner-Runner" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string WebDriverAgentRunner-Runner" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 16.0" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :DTPlatformName string iphoneos" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$RUNNER/Info.plist"
+              /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$RUNNER/Info.plist"
+            fi
+          fi
+
+          echo "Final Info.plist check:"
+          cat "$RUNNER/Info.plist"
+
+          # Ad-hoc sign
+          codesign --force --deep --sign - "$RUNNER" 2>&1 || true
+
+          # Package IPA
           rm -rf _staging
           mkdir -p _staging/Payload
           cp -R "$RUNNER" "_staging/Payload/$APP_NAME"
-
-          # Verify
-          ls -la "_staging/Payload/$APP_NAME/Info.plist" && echo "Info.plist OK"
+          
+          echo ""
+          echo "=== Verify ==="
+          ls -la "_staging/Payload/$APP_NAME/Info.plist"
 
           cd _staging
           zip -qr ../WebDriverAgent.ipa Payload/
           cd ..
+          
+          echo "=== IPA internal structure ==="
+          unzip -l WebDriverAgent.ipa | grep Info.plist
+          
           ls -lh WebDriverAgent.ipa
-          unzip -l WebDriverAgent.ipa | head -15
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
