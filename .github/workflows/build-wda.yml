@@ -20,75 +20,51 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
-      - name: Build
+      - name: Build with ad-hoc signing
         run: |
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
             -derivedDataPath ./build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            2>&1 | tail -5
-          echo "xcodebuild exit: $?"
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tail -10
+          echo "Build exit: $?"
 
-      - name: Inspect build products
-        run: |
-          echo "===== All .app directories ====="
-          find ./build/Build/Products -name "*.app" -type d
-
-          echo ""
-          RUNNER=$(find ./build/Build/Products -maxdepth 2 -name "*Runner*.app" -type d | head -1)
-          echo "Selected: $RUNNER"
-
-          echo ""
-          echo "===== ALL files in .app ====="
-          find "$RUNNER" -type f | sort
-
-          echo ""
-          echo "===== Info.plist ====="
-          cat "$RUNNER/Info.plist" 2>/dev/null || echo "NO Info.plist!"
-
-          echo ""
-          echo "===== Executable check ====="
-          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$RUNNER/Info.plist" 2>/dev/null || echo "")
-          echo "CFBundleExecutable = $EXEC"
-          ls -la "$RUNNER/$EXEC" 2>/dev/null || echo "Executable file NOT found"
-          file "$RUNNER/$EXEC" 2>/dev/null || echo "Cannot check file type"
-
-      - name: Package IPA
+      - name: Verify and package
         run: |
           RUNNER=$(find ./build/Build/Products -maxdepth 2 -name "*Runner*.app" -type d | head -1)
+          echo "App: $RUNNER"
+          echo ""
+
+          echo "===== Key files ====="
+          ls -la "$RUNNER/Info.plist" 2>/dev/null && echo "Info.plist: OK" || echo "Info.plist: MISSING"
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$RUNNER/Info.plist" 2>/dev/null || echo "UNKNOWN")
+          echo "Executable name: $EXEC"
+          ls -la "$RUNNER/$EXEC" 2>/dev/null && echo "Executable: OK" || echo "Executable: MISSING"
+          file "$RUNNER/$EXEC" 2>/dev/null
+
+          echo ""
+          echo "===== Full .app contents ====="
+          find "$RUNNER" -type f | sort | head -40
+
+          echo ""
           APP_NAME=$(basename "$RUNNER")
-
-          echo "Packaging: $RUNNER as $APP_NAME"
-
-          # Use ditto for proper macOS file copy (handles resource forks)
           rm -rf _staging
           mkdir -p "_staging/Payload"
           ditto "$RUNNER" "_staging/Payload/$APP_NAME"
 
-          # Ad-hoc sign so Sideloadly can process it
-          codesign --force --deep --sign - "_staging/Payload/$APP_NAME" 2>&1 || echo "Ad-hoc sign note (ok to fail)"
-
-          echo ""
-          echo "===== Verify Payload ====="
-          ls -la "_staging/Payload/$APP_NAME/Info.plist" 2>/dev/null && echo "Info.plist: PRESENT" || echo "Info.plist: MISSING!"
-
-          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "_staging/Payload/$APP_NAME/Info.plist" 2>/dev/null || echo "")
-          ls -la "_staging/Payload/$APP_NAME/$EXEC" 2>/dev/null && echo "Executable: PRESENT" || echo "Executable: MISSING!"
-
-          echo ""
-          echo "===== Creating IPA ====="
           cd _staging
           zip -qr ../WebDriverAgent.ipa Payload/
           cd ..
 
-          echo "===== IPA contents (key files) ====="
-          unzip -l WebDriverAgent.ipa | grep -E "(Info\.plist|Runner)" | head -20
-
+          echo "===== IPA verification ====="
+          unzip -l WebDriverAgent.ipa | grep -E "(Info\.plist|$EXEC)" | head -10
           ls -lh WebDriverAgent.ipa
 
       - name: Upload IPA
