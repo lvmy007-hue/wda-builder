@@ -20,111 +20,75 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.2.app || sudo xcode-select -s /Applications/Xcode.app
           xcodebuild -version
 
-      - name: Build WebDriverAgentRunner
+      - name: Build
         run: |
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
-            -sdk iphoneos \
-            -configuration Debug \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            ARCHS="arm64" \
-            ONLY_ACTIVE_ARCH=NO \
-            2>&1 | tail -20
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            2>&1 | tail -5
+          echo "xcodebuild exit: $?"
 
-      - name: Inspect and package
+      - name: Inspect build products
         run: |
-          echo "========== ALL .app DIRECTORIES =========="
-          find ./build -name "*.app" -type d
+          echo "===== All .app directories ====="
+          find ./build/Build/Products -name "*.app" -type d
 
           echo ""
-          echo "========== DETAILED CONTENTS =========="
-          for app in $(find ./build -name "*.app" -type d); do
-            echo "--- $app ---"
-            ls -la "$app/" 2>/dev/null | head -20
-            echo "Info.plist exists: $(test -f "$app/Info.plist" && echo YES || echo NO)"
-            if [ -f "$app/Info.plist" ]; then
-              /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$app/Info.plist" 2>/dev/null || echo "no bundle id"
-              /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Info.plist" 2>/dev/null || echo "no exec"
-            fi
-            echo ""
-          done
-
-          echo "========== XCTESTRUN FILES =========="
-          find ./build -name "*.xctestrun" -type f
+          RUNNER=$(find ./build/Build/Products -maxdepth 2 -name "*Runner*.app" -type d | head -1)
+          echo "Selected: $RUNNER"
 
           echo ""
-          echo "========== PRODUCTS DIR =========="
-          ls -laR ./build/Build/Products/ 2>/dev/null | head -80
+          echo "===== ALL files in .app ====="
+          find "$RUNNER" -type f | sort
 
-      - name: Create IPA from correct app
+          echo ""
+          echo "===== Info.plist ====="
+          cat "$RUNNER/Info.plist" 2>/dev/null || echo "NO Info.plist!"
+
+          echo ""
+          echo "===== Executable check ====="
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$RUNNER/Info.plist" 2>/dev/null || echo "")
+          echo "CFBundleExecutable = $EXEC"
+          ls -la "$RUNNER/$EXEC" 2>/dev/null || echo "Executable file NOT found"
+          file "$RUNNER/$EXEC" 2>/dev/null || echo "Cannot check file type"
+
+      - name: Package IPA
         run: |
-          # Find the runner app specifically in Products
-          RUNNER=$(find ./build/Build/Products -name "*Runner*.app" -type d -not -path "*/PlugIns/*" | head -1)
-          
-          if [ -z "$RUNNER" ]; then
-            echo "No Runner app, trying any .app not in PlugIns..."
-            RUNNER=$(find ./build/Build/Products -name "*.app" -type d -not -path "*/PlugIns/*" | head -1)
-          fi
-
-          if [ -z "$RUNNER" ]; then
-            echo "FATAL: Cannot find any suitable .app"
-            exit 1
-          fi
-
-          echo "Selected app: $RUNNER"
+          RUNNER=$(find ./build/Build/Products -maxdepth 2 -name "*Runner*.app" -type d | head -1)
           APP_NAME=$(basename "$RUNNER")
 
-          # Check if Info.plist exists, create if missing
-          if [ ! -f "$RUNNER/Info.plist" ]; then
-            echo "Info.plist MISSING - creating from build settings..."
-            
-            # Try to find Info.plist elsewhere in the build
-            FOUND_PLIST=$(find ./build -name "Info.plist" -path "*Runner*" | head -1)
-            if [ -n "$FOUND_PLIST" ]; then
-              echo "Found plist at: $FOUND_PLIST"
-              cp "$FOUND_PLIST" "$RUNNER/Info.plist"
-            else
-              echo "Creating minimal Info.plist..."
-              /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.facebook.WebDriverAgentRunner.xctrunner" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleName string WebDriverAgentRunner-Runner" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string WebDriverAgentRunner-Runner" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 16.0" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms array" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :CFBundleSupportedPlatforms:0 string iPhoneOS" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :DTPlatformName string iphoneos" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily array" "$RUNNER/Info.plist"
-              /usr/libexec/PlistBuddy -c "Add :UIDeviceFamily:0 integer 1" "$RUNNER/Info.plist"
-            fi
-          fi
+          echo "Packaging: $RUNNER as $APP_NAME"
 
-          echo "Final Info.plist check:"
-          cat "$RUNNER/Info.plist"
-
-          # Ad-hoc sign
-          codesign --force --deep --sign - "$RUNNER" 2>&1 || true
-
-          # Package IPA
+          # Use ditto for proper macOS file copy (handles resource forks)
           rm -rf _staging
-          mkdir -p _staging/Payload
-          cp -R "$RUNNER" "_staging/Payload/$APP_NAME"
-          
-          echo ""
-          echo "=== Verify ==="
-          ls -la "_staging/Payload/$APP_NAME/Info.plist"
+          mkdir -p "_staging/Payload"
+          ditto "$RUNNER" "_staging/Payload/$APP_NAME"
 
+          # Ad-hoc sign so Sideloadly can process it
+          codesign --force --deep --sign - "_staging/Payload/$APP_NAME" 2>&1 || echo "Ad-hoc sign note (ok to fail)"
+
+          echo ""
+          echo "===== Verify Payload ====="
+          ls -la "_staging/Payload/$APP_NAME/Info.plist" 2>/dev/null && echo "Info.plist: PRESENT" || echo "Info.plist: MISSING!"
+
+          EXEC=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "_staging/Payload/$APP_NAME/Info.plist" 2>/dev/null || echo "")
+          ls -la "_staging/Payload/$APP_NAME/$EXEC" 2>/dev/null && echo "Executable: PRESENT" || echo "Executable: MISSING!"
+
+          echo ""
+          echo "===== Creating IPA ====="
           cd _staging
           zip -qr ../WebDriverAgent.ipa Payload/
           cd ..
-          
-          echo "=== IPA internal structure ==="
-          unzip -l WebDriverAgent.ipa | grep Info.plist
-          
+
+          echo "===== IPA contents (key files) ====="
+          unzip -l WebDriverAgent.ipa | grep -E "(Info\.plist|Runner)" | head -20
+
           ls -lh WebDriverAgent.ipa
 
       - name: Upload IPA
